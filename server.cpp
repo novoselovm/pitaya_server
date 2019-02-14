@@ -67,6 +67,8 @@
 #define CMD_ADC_STOP 0x0a
 
 #define REG_ALL			0xFF
+#define REG_CFG			0xFA
+#define REG_STATE			0xFB
 #define REG_SYNC			0x02
 #define REG_TIME			0x04
 #define REG_ADC_DATA		0x06
@@ -106,11 +108,11 @@ bool adc_run = false;
 bool file_rec_run = false;
 bool allow_file_write = false;
 
-uint32_t rec_per_file = 1200;
-uint32_t data_average = 20;
+uint16_t rec_per_file = 1200;
+uint16_t data_average = 20;
 
-uint32_t sync_source = SYNC_EXT;
-uint32_t adc_timeout = 500;
+uint16_t sync_source = SYNC_EXT;
+uint16_t adc_timeout = 500;
 
 uint32_t curr_file_record = 0;
 uint32_t file_size = 0;
@@ -125,16 +127,22 @@ uint32_t data_for_send[DATA_ARRAY_SIZE * 2];
 
 struct config
 {
+	uint16_t adc_timeout;
+	uint16_t sync_source;
+	uint16_t data_average;
+	uint16_t rec_per_file;
+	uint32_t curr_time;
+};
+
+struct state
+{
 	bool adc_run;
 	bool file_rec_run;
-	uint16_t adc_timeout;
-	uint32_t sync_source;
-	uint32_t data_average;
-	uint32_t rec_per_file;
-	uint32_t curr_time;
+	uint16_t reserverd;
 	uint32_t curr_pulses;
 	uint64_t total_pulses;
 };
+
 /*
 
 ----------------------------------------------------------------------------------------------------
@@ -630,25 +638,36 @@ void ClientThread(int peer)
 							bytes_read = send(peer, &curr_pulses, sizeof(unsigned long), 0);
 							break;
 
-						case REG_ALL:
-							// get all server registers
+						case REG_CFG:
+						{	// get all server registers
 							config send_cfg;
 
 							// filling config strucure
-							send_cfg.adc_run = adc_run;
-							send_cfg.file_rec_run = file_rec_run;
 							send_cfg.adc_timeout = (uint16_t) adc_timeout;
 							send_cfg.sync_source = sync_source;
 							send_cfg.data_average = data_average;
 							send_cfg.rec_per_file = rec_per_file;
 							send_cfg.curr_time = (uint32_t) time(NULL);
-							send_cfg.curr_pulses = curr_pulses;
-							send_cfg.total_pulses = total_pulses;
 
 							// send structure to peer
 							bytes_read = send(peer, &send_cfg, sizeof(send_cfg),0);
+							std::cout << "send config in: " << bytes_read << std::endl;
 							break;
+						}
 
+						case REG_STATE:
+						{
+							state send_state;
+
+							send_state.adc_run = adc_run;
+							send_state.file_rec_run = file_rec_run;
+							send_state.curr_pulses = curr_pulses;
+							send_state.total_pulses = total_pulses;
+
+							bytes_read = send(peer, &send_state, sizeof(state),0);
+							std::cout << "send state in: " << bytes_read << std::endl;
+							break;
+						}
 						default:
 							std::cout << "Bad argument for GET command." << std::endl;
 					}
@@ -841,7 +860,7 @@ int main()
 	curr_time = time(NULL);
 
 	// message to console for understanding server is started
-	std::cout << std::endl << "---- Server started at " << ctime(&curr_time) << std::endl << std::endl;
+	std::cout << sizeof(config)<<" " << sizeof(state) << std::endl << "---- Server started at " << ctime(&curr_time) << std::endl << std::endl;
 
 	// non blocking wait threads done;
 	while(run)
