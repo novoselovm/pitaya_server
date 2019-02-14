@@ -48,6 +48,10 @@
 #define ADC_READY_RAM_SIZE	0x7E00
 #define DATA_BUF_SIZE 		0x4000
 
+#define DATA_ARRAY_SIZE			0x4000	// adc 16384 of 16 bit elements per channel
+
+#define DATA_FILE_PATH 		"/mnt/data/myfile/"
+
 #define MAP_SIZE 		0x70000
 #define MAP_MASK 		(MAP_SIZE - 1)
 
@@ -60,12 +64,13 @@
 #define CMD_ADC_RUN	0x08
 #define CMD_ADC_STOP 0x0a
 
-#define REG_SYNC		0x02
-#define REG_TIME		0x04
-#define REG_ADC_DATA	0x06
-#define REG_TIMEOUT	0x08
-#define REG_COUNTER	0x09
-#define REG_FILE_RUN 0x0a
+#define REG_SYNC			0x02
+#define REG_TIME			0x04
+#define REG_ADC_DATA		0x06
+#define REG_ADC_DATA_16	0x07
+#define REG_TIMEOUT		0x08
+#define REG_COUNTER		0x09
+#define REG_FILE_RUN 	0x0a
 
 #define SYNC_EXT			0xFF
 #define SYNC_INT			0x01
@@ -75,17 +80,25 @@
 
 bool run = true;
 bool adc_run = false;
+
+bool data_updated_16 = false;
+bool data_need_send_16 = false;
+
 bool data_updated = false;
 bool data_need_send = false;
+
 bool file_rec_run = false;
-bool file_data_updated = false;
+
+bool allow_file_write = false;
 
 std::ofstream out_data_file;
 std::time_t curr_time;
 
 unsigned long pulses_counter = 0;
+
 unsigned int rec_per_file = 1200;
-unsigned int data_average = 1;
+
+unsigned int data_average = 20;
 
 unsigned int sync_source = SYNC_EXT;
 unsigned int adc_timeout = 500;
@@ -94,7 +107,11 @@ unsigned int curr_file_record = 0;
 unsigned int file_size = 0;
 
 void* map_base = (void *)-1;
-uint32_t data[DATA_BUF_SIZE];
+uint32_t data[DATA_ARRAY_SIZE * 2];
+uint16_t adc_data[DATA_ARRAY_SIZE * 2];
+
+uint32_t data_for_file[DATA_ARRAY_SIZE * 2];
+uint32_t data_for_send[DATA_ARRAY_SIZE * 2];
 
 
 
@@ -113,7 +130,7 @@ uint32_t read_value(uint32_t a_addr);
 void write_value(uint32_t a_addr, uint32_t a_value);
 
 // get data from adc once
-int GetData(uint32_t *adc_data);
+int GetData(uint16_t *adc_data);
 
 // make clock in mask bit of GPIO_PL_0 reg
 void make_clock(uint32_t mask);
@@ -138,7 +155,7 @@ void write_value(uint32_t a_addr, uint32_t a_value)
 /*
 
 ----------------------------------------------------------------------------------------------------
-	Read value from reg.
+	Read 32 bit  value from reg.
 ----------------------------------------------------------------------------------------------------
 
 */
@@ -149,6 +166,19 @@ uint32_t read_value(uint32_t a_addr)
 	return *((uint32_t*) virt_addr);
 }
 
+/*
+
+----------------------------------------------------------------------------------------------------
+	Read 16 bit value from reg.
+----------------------------------------------------------------------------------------------------
+
+*/
+
+uint16_t read_value_16(uint32_t a_addr)
+{
+	void* virt_addr = (void*)((uint8_t*)map_base + a_addr);
+	return *((uint16_t*) virt_addr);
+}
 
 /*
 
@@ -161,11 +191,12 @@ uint32_t read_value(uint32_t a_addr)
 void adcThread()
 {
 	uint32_t read_data;
-	uint32_t adc_data[DATA_BUF_SIZE];
 
 	// flush array of data memories
-	memset(data, 0, DATA_BUF_SIZE * sizeof(uint32_t));
-	memset(adc_data, 0, DATA_BUF_SIZE * sizeof(uint32_t));
+	memset(data, 0, DATA_ARRAY_SIZE * 2 * sizeof(uint32_t));
+	memset(data_for_file, 0, DATA_ARRAY_SIZE * 2 * sizeof(uint32_t));
+	memset(data_for_send, 0, DATA_ARRAY_SIZE * 2 * sizeof(uint32_t));
+	memset(adc_data, 0, DATA_ARRAY_SIZE * 2 * sizeof(uint16_t));
 
 	// while server running
 	while(run)
@@ -173,27 +204,46 @@ void adcThread()
 		if(adc_run)// adc runs
 		{
 			// if data got success
-			if(GetData(adc_data) > 0)
+
+			int count = GetData(adc_data);
+			if(count > 0)
 			{
 				// copy data to golbal variable
-				for(int i = 0; i < DATA_BUF_SIZE; i++)
-					data[i] = adc_data[i];
-
-				// fix data updated event
-				data_updated = true;
-				data_need_send = true;
+				for(int i = 0; i < DATA_ARRAY_SIZE * 2; i++)
+					data[i] += (uint32_t) adc_data[i];
+				data_updated_16 = true;
 
 				// total pulses
 				pulses_counter++;
 
-				if(file_rec_run)
+				if(pulses_counter % data_average == 0)
 				{
+					// mark data updated event
+
+					//data_need_send = true;
+
+					for(int i = 0; i < DATA_ARRAY_SIZE * 2; i++)
+					{
+						data_for_file[i] = data[i];
+						data_for_send[i] = data[i];
+					}
+
+					data_updated = true;
+					allow_file_write = true;
+
+					memset(data, 0, DATA_ARRAY_SIZE * 2 * sizeof(uint32_t));
+				}
+
+				if(file_rec_run && allow_file_write)
+				{
+					allow_file_write = false;
+
 					if(curr_file_record == 0)
 					{
 						curr_time = time(NULL);
 
 						struct tm *tm_struct;
-						tm_struct = gmtime(&curr_time); //localtime(&curr_time);
+						tm_struct = localtime(&curr_time);
 
 						// creating string stream for time formatting
 						std::stringstream ss;
@@ -205,7 +255,7 @@ void adcThread()
 							<< tm_struct->tm_sec << ".ch2";
 
 						// convert stream to string
-						std::string time_str = "/mnt/data/myfile/" + ss.str();
+						std::string time_str = DATA_FILE_PATH + ss.str();
 
 						// trying open/create stream file
 						out_data_file.open(time_str);
@@ -218,18 +268,19 @@ void adcThread()
 						}
 						else
 						{
-							out_data_file.write((char*)&rec_per_file, sizeof(uint32_t));	// #0x00
-							out_data_file.write((char*)&data_average, sizeof(uint32_t));	// #0x04
-							out_data_file.write((char*)&rec_per_file, sizeof(uint32_t));	// #0x08
-							out_data_file.write((char*)&curr_time, sizeof(std::time_t));	// #0x0c
-							out_data_file.write((char*)&curr_time, sizeof(std::time_t));	// #0x10
+							out_data_file.write((char*)&rec_per_file, sizeof(uint32_t));	// #0x00 file records(plan)
+							out_data_file.write((char*)&data_average, sizeof(uint32_t));	// #0x04 pulses average
+							out_data_file.write((char*)&rec_per_file, sizeof(uint32_t));	// #0x08	file records(real)
+							out_data_file.write((char*)&curr_time, sizeof(std::time_t));	// #0x0c time start
+							out_data_file.write((char*)&curr_time, sizeof(std::time_t));	// #0x10	time end
 						}
 					}
 
 					if(out_data_file.is_open())
 					{
-						out_data_file.write((char*)&curr_file_record, sizeof(uint32_t));
-						out_data_file.write((char*)data, DATA_BUF_SIZE*sizeof(uint32_t));  // << curr_file_record;
+						out_data_file.write((char*)&curr_file_record, sizeof(uint32_t));				// number of record
+						out_data_file.write((char*)data, DATA_ARRAY_SIZE * 2 * sizeof(uint32_t));  // record
+
 						curr_file_record++;
 					}
 
@@ -295,7 +346,7 @@ void IntSyncThread()
 
 */
 
-int GetData(uint32_t *adc_data)
+int GetData(uint16_t *adc_data)
 {
 	// Turn on ADC1 and ADC2 converting
 	make_clock( ADC1_ON | ADC2_ON );
@@ -334,15 +385,15 @@ int GetData(uint32_t *adc_data)
 
 	// TODO: may be optimize with pointers
 	int idx = 0;
-	for(int ram_addr = 0; ram_addr < ADC_RAM_SIZE; ram_addr += 4)
+	for(int ram_addr = 0; ram_addr < ADC_RAM_SIZE; ram_addr += 2)
 	{
-		adc_data[idx] = read_value(ADC1_RAM - BASE_ADDR + ram_addr);
+		adc_data[idx] = read_value_16(ADC1_RAM - BASE_ADDR + ram_addr) & 0x3FFF;
 		idx++;
 	}
 
-	for(int ram_addr = 0; ram_addr < ADC_RAM_SIZE; ram_addr += 4)
+	for(int ram_addr = 0; ram_addr < ADC_RAM_SIZE; ram_addr += 2)
 	{
-		adc_data[idx] = read_value(ADC2_RAM - BASE_ADDR + ram_addr);
+		adc_data[idx] = read_value_16(ADC2_RAM - BASE_ADDR + ram_addr) & 0x3FFF;
 		idx++;
 	}
 
@@ -357,24 +408,41 @@ int GetData(uint32_t *adc_data)
 
 */
 
-void ClientSendThread(int peer)
+void ClientSendThread(int peer, bool *connected)
 {
-	bool client_connected = true;
+	//bool client_connected = true;
 	int bytes_read = 0;
 
-	while(client_connected)
+	std::cout << "client_send_thread started" << std::endl;
+
+	while(*connected)
 	{
 		if(data_need_send)
 		{
-			bytes_read = send(peer, data, DATA_BUF_SIZE*sizeof(uint32_t), 0);
+			bytes_read = send(peer, data_for_send, DATA_ARRAY_SIZE * 2 * sizeof(uint32_t), 0);
 			data_need_send = false;
 
-			if(bytes_read <= 0)
-				client_connected = false;
+
+			//if(bytes_read <= DATA_ARRAY_SIZE * 2 * sizeof(uint32_t))
+			std::cout << "read: " << bytes_read << std::endl;
+			//	client_connected = false;
+		}
+		else
+			usleep(1000);
+
+		if(data_need_send_16)
+		{
+			bytes_read = send(peer, adc_data, DATA_ARRAY_SIZE * 2 * sizeof(uint16_t), 0);
+			data_need_send_16 = false;
+
+			//if(bytes_read <= 0)
+			//	client_connected = false;
 		}
 		else
 			usleep(1000);
 	}
+
+	std::cout << "client_send_thread ended" << std::endl;
 }
 
 void ClientThread(int peer)
@@ -387,6 +455,11 @@ void ClientThread(int peer)
 	int argument = 0;
 	int value = 0;
 	bool client_connected = true;
+
+	std::cout << "client_thread started" << std::endl;
+
+	std::thread client_send_thr(ClientSendThread, peer, &client_connected);
+	client_send_thr.detach();
 
 	//std::vector <std::string> v_command;
 
@@ -478,16 +551,24 @@ void ClientThread(int peer)
 					{
 						struct tm *ts;
 						struct timeval time_in_sec;
+						//struct timezone tz;
 						double *fract_sec;
+
+						//tz.tz_minuteswest = -420; //tomsk?
+						//tz.tz_dsttime = 0;
 
 						// gettting time structure and fractional seconds from buffer
 						ts =  (struct tm*) (&buffer[11]);
 						fract_sec = (double*)(&buffer[3]);
 
+						//gettimeofday(&time_in_sec, &tz);
+
+						//std::cout << "timezone " << tz.tz_minuteswest << " dst: " << tz.tz_dsttime << std::endl;
+
 						// cast time to linux format
 						ts->tm_year = ts->tm_year - 1900;
 						ts->tm_mon = ts->tm_mon - 1;
-						ts->tm_hour = ts->tm_hour - 1;
+						ts->tm_hour = ts->tm_hour;
 
 						// fill timeval structure for settimeofdate
 						time_in_sec.tv_sec = mktime(ts);
@@ -504,9 +585,19 @@ void ClientThread(int peer)
 					// trying to send adc data to peer
 					if(argument == REG_ADC_DATA)
 					{
+						std::cout << "data_reg cmd" << std::endl;
 						//Send only if adc is running and data is 'fresh'
 						if( adc_run & data_updated )
 							data_need_send = true;
+
+						std::cout << "data_reg end" << std::endl;
+					}
+
+					if(argument == REG_ADC_DATA_16)
+					{
+						//Send only if adc is running and data is 'fresh'
+						if( adc_run & data_updated_16 )
+							data_need_send_16 = true;
 					}
 
 					// trying to send value of pulses counter to peer
@@ -522,7 +613,8 @@ void ClientThread(int peer)
 					break;
 			}// end switch(command)
 		}
-	}// end while(run)
+	}// end while(client_connected)
+	std::cout << "client_thread ended" << std::endl;
 }//end of function
 
 /*
@@ -606,9 +698,6 @@ void ServerListener()
 			// create thread for peer service
 			std::thread client_thr(ClientThread, client);
 			client_thr.detach();
-
-			std::thread client_send_thr(ClientSendThread, client);
-			client_send_thr.detach();
 		}
 	}
 
