@@ -64,6 +64,7 @@
 #define CMD_ADC_RUN	0x08
 #define CMD_ADC_STOP 0x0a
 
+#define REG_ALL			0xFF
 #define REG_SYNC			0x02
 #define REG_TIME			0x04
 #define REG_ADC_DATA		0x06
@@ -71,6 +72,8 @@
 #define REG_TIMEOUT		0x08
 #define REG_COUNTER		0x09
 #define REG_FILE_RUN 	0x0a
+#define REG_RECORDS		0x0b
+#define REG_AVERAGE		0x0c
 
 #define SYNC_EXT			0xFF
 #define SYNC_INT			0x01
@@ -79,7 +82,7 @@
 #define SYNC_INT_DELAY	50000
 
 bool run = true;
-bool adc_run = false;
+
 
 bool data_updated_16 = false;
 bool data_need_send_16 = false;
@@ -87,24 +90,26 @@ bool data_need_send_16 = false;
 bool data_updated = false;
 bool data_need_send = false;
 
-bool file_rec_run = false;
 
-bool allow_file_write = false;
 
 std::ofstream out_data_file;
 std::time_t curr_time;
 
-unsigned long pulses_counter = 0;
+uint64_t total_pulses = 0;
+uint32_t curr_pulses = 0;
 
-unsigned int rec_per_file = 1200;
+bool adc_run = false;
+bool file_rec_run = false;
+bool allow_file_write = false;
 
-unsigned int data_average = 20;
+uint32_t rec_per_file = 1200;
+uint32_t data_average = 20;
 
-unsigned int sync_source = SYNC_EXT;
-unsigned int adc_timeout = 500;
+uint32_t sync_source = SYNC_EXT;
+uint32_t adc_timeout = 500;
 
-unsigned int curr_file_record = 0;
-unsigned int file_size = 0;
+uint32_t curr_file_record = 0;
+uint32_t file_size = 0;
 
 void* map_base = (void *)-1;
 uint32_t data[DATA_ARRAY_SIZE * 2];
@@ -112,10 +117,6 @@ uint16_t adc_data[DATA_ARRAY_SIZE * 2];
 
 uint32_t data_for_file[DATA_ARRAY_SIZE * 2];
 uint32_t data_for_send[DATA_ARRAY_SIZE * 2];
-
-
-
-
 
 /*
 
@@ -214,19 +215,19 @@ void adcThread()
 				data_updated_16 = true;
 
 				// total pulses
-				pulses_counter++;
+				total_pulses++;
+				curr_pulses++;
 
-				if(pulses_counter % data_average == 0)
+				if(curr_pulses % data_average == 0)
 				{
-					// mark data updated event
-
-					//data_need_send = true;
-
 					for(int i = 0; i < DATA_ARRAY_SIZE * 2; i++)
 					{
 						data_for_file[i] = data[i];
 						data_for_send[i] = data[i];
 					}
+
+					// mark data updated event
+					//data_need_send = true;
 
 					data_updated = true;
 					allow_file_write = true;
@@ -279,7 +280,7 @@ void adcThread()
 					if(out_data_file.is_open())
 					{
 						out_data_file.write((char*)&curr_file_record, sizeof(uint32_t));				// number of record
-						out_data_file.write((char*)data, DATA_ARRAY_SIZE * 2 * sizeof(uint32_t));  // record
+						out_data_file.write((char*)data_for_file, DATA_ARRAY_SIZE * 2 * sizeof(uint32_t));  // record
 
 						curr_file_record++;
 					}
@@ -528,6 +529,18 @@ void ClientThread(int peer)
 						adc_timeout = (unsigned int)value;
 					}
 
+					// records per file
+					if(argument == REG_RECORDS)
+					{
+						rec_per_file = (unsigned int) value;
+					}
+
+					// pulses average
+					if(argument == REG_AVERAGE)
+					{
+						data_average = (unsigned int) value;
+					}
+
 					// TODO: time synchronization when peer connected
 					// setting up system time is got from host
 					if(argument == REG_TIME)
@@ -566,28 +579,78 @@ void ClientThread(int peer)
 				//if command GET
 				case CMD_GET:
 					// trying to send adc data to peer
-					if(argument == REG_ADC_DATA)
-					{
-						std::cout << "data_reg cmd" << std::endl;
-						//Send only if adc is running and data is 'fresh'
-						if( adc_run & data_updated )
-							data_need_send = true;
 
-						std::cout << "data_reg end" << std::endl;
-					}
-
-					if(argument == REG_ADC_DATA_16)
+					switch(argument)
 					{
-						//Send only if adc is running and data is 'fresh'
-						if( adc_run & data_updated_16 )
-							data_need_send_16 = true;
-					}
+						case REG_ADC_DATA:
+							//Send only if adc is running and data is 'fresh'
+							if( adc_run & data_updated )
+								data_need_send = true;
+							break;
+						case REG_ADC_DATA_16:
+							//Send only if adc is running and data is 'fresh'
+							if( adc_run & data_updated_16 )
+								data_need_send_16 = true;
+							break;
+						case REG_COUNTER:
+							// trying to send value of pulses counter to peer
+							bytes_read = send(peer, &curr_pulses, sizeof(unsigned long), 0);
+							break;
 
-					// trying to send value of pulses counter to peer
-					if( argument == REG_COUNTER)
-					{
-						bytes_read = send(peer, &pulses_counter, sizeof(unsigned long), 0);
+						case REG_ALL:
+							// get all server registers
+
+							/*
+							adc_run 			// bool
+							file_rec_run	// bool
+
+							adc_timeout		// unsigned int
+							sync_source		// unsigned int
+
+							data_average 	// unsigned int
+							rec_per_file 	// unsigned int
+
+							curr_time		// time_t
+							curr_pulses		// unsigned int
+							total_pulses	// unsigned long
+							*/
+
+							struct config
+							{
+								bool adc_run;
+								bool file_rec_run;
+								uint16_t adc_timeout;
+								uint32_t sync_source;
+								uint32_t data_average;
+								uint32_t rec_per_file;
+								uint32_t curr_time;
+								uint32_t curr_pulses;
+								uint64_t total_pulses;
+							};
+
+							config send_cfg;
+
+							send_cfg.adc_run = adc_run;
+							send_cfg.file_rec_run = file_rec_run;
+							send_cfg.adc_timeout = (uint16_t) adc_timeout;
+							send_cfg.sync_source = sync_source;
+							send_cfg.data_average = data_average;
+							send_cfg.rec_per_file = rec_per_file;
+							send_cfg.curr_time = (uint32_t) time(NULL);
+							send_cfg.curr_pulses = curr_pulses;
+							send_cfg.total_pulses = total_pulses;
+
+							bytes_read = send(peer, &send_cfg, sizeof(send_cfg),0);
+
+							std::cout << "registers send in " << bytes_read << " bytes" << std::endl;
+
+							//TODO: 1 - try to send each register, 2 - try with structure
+							break;
+
+						default:
+							std::cout << "Bad argument for GET command." << std::endl;
 					}
+					// case CMD_GET.
 					break;
 
 				default:
@@ -600,6 +663,7 @@ void ClientThread(int peer)
 
 	// waiting for client thread ended 
 	client_send_thr.join();
+
 }//end of function
 
 /*
