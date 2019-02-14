@@ -114,7 +114,7 @@ uint16_t data_average = 20;
 uint16_t sync_source = SYNC_EXT;
 uint16_t adc_timeout = 500;
 
-uint32_t curr_file_record = 0;
+uint16_t curr_file_record = 0;
 uint32_t file_size = 0;
 
 void* map_base = (void *)-1;
@@ -166,7 +166,7 @@ std::vector <std::string> ParseCommand(char buf[]);
 /*
 
 ----------------------------------------------------------------------------------------------------
-	Write value to address.
+	Write value to address of memory map.
 ----------------------------------------------------------------------------------------------------
 
 */
@@ -181,7 +181,7 @@ void write_value(uint32_t a_addr, uint32_t a_value)
 /*
 
 ----------------------------------------------------------------------------------------------------
-	Read 32 bit  value from reg.
+	Read 32 bit  value from memory map.
 ----------------------------------------------------------------------------------------------------
 
 */
@@ -195,7 +195,7 @@ uint32_t read_value(uint32_t a_addr)
 /*
 
 ----------------------------------------------------------------------------------------------------
-	Read 16 bit value from reg.
+	Read 16 bit value from memory map.
 ----------------------------------------------------------------------------------------------------
 
 */
@@ -230,9 +230,7 @@ void adcThread()
 		if(adc_run)// adc runs
 		{
 			// if data got success
-
-			int count = GetData(adc_data);
-			if(count > 0)
+			if( GetData(adc_data) > 0)
 			{
 				// copy data to golbal variable
 				for(int i = 0; i < DATA_ARRAY_SIZE * 2; i++)
@@ -292,17 +290,17 @@ void adcThread()
 						}
 						else
 						{
-							out_data_file.write((char*)&rec_per_file, sizeof(uint32_t));	// #0x00 file records(plan)
-							out_data_file.write((char*)&data_average, sizeof(uint32_t));	// #0x04 pulses average
-							out_data_file.write((char*)&rec_per_file, sizeof(uint32_t));	// #0x08	file records(real)
-							out_data_file.write((char*)&curr_time, sizeof(std::time_t));	// #0x0c time start
-							out_data_file.write((char*)&curr_time, sizeof(std::time_t));	// #0x10	time end
+							out_data_file.write((char*)&rec_per_file, sizeof(uint16_t));	// #0x00 file records(plan)
+							out_data_file.write((char*)&data_average, sizeof(uint16_t));	// #0x02 pulses average
+							out_data_file.write((char*)&rec_per_file, sizeof(uint16_t));	// #0x04	file records(real)
+							out_data_file.write((char*)&curr_time, sizeof(std::time_t));	// #0x06 time start
+							out_data_file.write((char*)&curr_time, sizeof(std::time_t));	// #0x0a	time end
 						}
 					}
 
 					if(out_data_file.is_open())
 					{
-						out_data_file.write((char*)&curr_file_record, sizeof(uint32_t));				// number of record
+						out_data_file.write((char*)&curr_file_record, sizeof(uint16_t));				// number of record
 						out_data_file.write((char*)data_for_file, DATA_ARRAY_SIZE * 2 * sizeof(uint32_t));  // record
 
 						curr_file_record++;
@@ -311,7 +309,7 @@ void adcThread()
 					if(curr_file_record >= 1200)
 					{
 						curr_time = time(NULL);
-						out_data_file.seekp(0x10, out_data_file.beg);
+						out_data_file.seekp(0x0a, out_data_file.beg);
 						out_data_file.write((char*)&curr_time, sizeof(std::time_t));
 						out_data_file.close();
 						curr_file_record = 0;
@@ -326,12 +324,14 @@ void adcThread()
 			if(out_data_file.is_open())
 			{
 				curr_time = time(NULL);
-				out_data_file.seekp(0x10, out_data_file.beg);
+				out_data_file.seekp(0x0a, out_data_file.beg);
 				out_data_file.write((char*)&curr_time, sizeof(std::time_t));
-				out_data_file.seekp(0x08, out_data_file.beg);
-				out_data_file.write((char*)&curr_file_record, sizeof(unsigned int));
-				out_data_file.write((char*)&curr_time, sizeof(std::time_t));
+
+				out_data_file.seekp(0x04, out_data_file.beg);
+				out_data_file.write((char*)&curr_file_record, sizeof(uint16_t));
+
 				out_data_file.close();
+				curr_file_record = 0;
 			}
 
 			std::this_thread::sleep_for(std::chrono::milliseconds(SYS_IDLE));
@@ -651,7 +651,6 @@ void ClientThread(int peer)
 
 							// send structure to peer
 							bytes_read = send(peer, &send_cfg, sizeof(send_cfg),0);
-							std::cout << "send config in: " << bytes_read << std::endl;
 							break;
 						}
 
@@ -665,7 +664,6 @@ void ClientThread(int peer)
 							send_state.total_pulses = total_pulses;
 
 							bytes_read = send(peer, &send_state, sizeof(state),0);
-							std::cout << "send state in: " << bytes_read << std::endl;
 							break;
 						}
 						default:
@@ -860,7 +858,7 @@ int main()
 	curr_time = time(NULL);
 
 	// message to console for understanding server is started
-	std::cout << sizeof(config)<<" " << sizeof(state) << std::endl << "---- Server started at " << ctime(&curr_time) << std::endl << std::endl;
+	std::cout << std::endl << "---- Server started at " << ctime(&curr_time) << std::endl << std::endl;
 
 	// non blocking wait threads done;
 	while(run)
