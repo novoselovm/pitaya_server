@@ -81,9 +81,11 @@ bool file_rec_run = false;
 bool file_data_updated = false;
 
 std::ofstream out_data_file;
-std::time_t  curr_time;
+std::time_t curr_time;
 
 unsigned long pulses_counter = 0;
+unsigned int rec_per_file = 1200;
+unsigned int data_average = 1;
 
 unsigned int sync_source = SYNC_EXT;
 unsigned int adc_timeout = 500;
@@ -191,7 +193,7 @@ void adcThread()
 						curr_time = time(NULL);
 
 						struct tm *tm_struct;
-						tm_struct = localtime(&curr_time);
+						tm_struct = gmtime(&curr_time); //localtime(&curr_time);
 
 						// creating string stream for time formatting
 						std::stringstream ss;
@@ -214,16 +216,28 @@ void adcThread()
 							file_rec_run = false;
 							std::cout << "File open error" << std::endl;
 						}
+						else
+						{
+							out_data_file.write((char*)&rec_per_file, sizeof(uint32_t));	// #0x00
+							out_data_file.write((char*)&data_average, sizeof(uint32_t));	// #0x04
+							out_data_file.write((char*)&rec_per_file, sizeof(uint32_t));	// #0x08
+							out_data_file.write((char*)&curr_time, sizeof(std::time_t));	// #0x0c
+							out_data_file.write((char*)&curr_time, sizeof(std::time_t));	// #0x10
+						}
 					}
 
 					if(out_data_file.is_open())
 					{
+						out_data_file.write((char*)&curr_file_record, sizeof(uint32_t));
 						out_data_file.write((char*)data, DATA_BUF_SIZE*sizeof(uint32_t));  // << curr_file_record;
 						curr_file_record++;
 					}
 
 					if(curr_file_record >= 1200)
 					{
+						curr_time = time(NULL);
+						out_data_file.seekp(0x10, out_data_file.beg);
+						out_data_file.write((char*)&curr_time, sizeof(std::time_t));
 						out_data_file.close();
 						curr_file_record = 0;
 					}
@@ -234,6 +248,16 @@ void adcThread()
 		}
 		else
 		{
+			if(out_data_file.is_open())
+			{
+				curr_time = time(NULL);
+				out_data_file.seekp(0x10, out_data_file.beg);
+				out_data_file.write((char*)&curr_time, sizeof(std::time_t));
+				out_data_file.seekp(0x08, out_data_file.beg);
+				out_data_file.write((char*)&curr_file_record, sizeof(unsigned int));
+				out_data_file.write((char*)&curr_time, sizeof(std::time_t));
+				out_data_file.close();
+			}
 			usleep(1000); // TODO: replace usleep with proc. control
 		}
 	}
@@ -463,6 +487,7 @@ void ClientThread(int peer)
 						// cast time to linux format
 						ts->tm_year = ts->tm_year - 1900;
 						ts->tm_mon = ts->tm_mon - 1;
+						ts->tm_hour = ts->tm_hour - 1;
 
 						// fill timeval structure for settimeofdate
 						time_in_sec.tv_sec = mktime(ts);
@@ -674,8 +699,8 @@ int main()
 	// because they have blocking calls
 
 	curr_time = time(NULL);
-	// message to console for understanding server is started
 
+	// message to console for understanding server is started
 	std::cout << std::endl << "---- Server started at " << ctime(&curr_time) << std::endl << std::endl;
 
 	// non blocking wait threads done;
