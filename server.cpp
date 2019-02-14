@@ -7,6 +7,7 @@
 #include <thread>
 #include <mutex>
 #include <chrono>
+#include <bitset>
 
 #include <ctime>
 #include <cstring>
@@ -58,6 +59,8 @@
 #define MAP_MASK 		(MAP_SIZE - 1)
 
 
+#define SETUP_FILE_NAME "settings.cfg"
+
 #define DEV_ID			0xFA
 
 #define CMD_EXIT 		0xFF
@@ -78,6 +81,8 @@
 #define REG_FILE_RUN 	0x0a
 #define REG_RECORDS		0x0b
 #define REG_AVERAGE		0x0c
+#define REG_CH1_NAME		0x0d
+#define REG_CH2_NAME		0x0e
 
 #define SYNC_EXT			0xFF
 #define SYNC_INT			0x01
@@ -85,6 +90,19 @@
 #define SYNC_INT_BIT		0x01
 #define SYNC_INT_DELAY	50  		// intrnal sync delay (ms)
 #define SYS_IDLE		   1			// system_idle (ms)
+
+
+// config file defines
+
+#define ADC_RUN_ADDR 0x00
+#define FILE_REC_RUN_ADDR 0x01
+#define REC_PER_FILE_ADDR 0x02
+#define DATA_AVERAGE_ADDR 0x04
+#define SYNC_SOURCE_ADDR 0x06
+#define ADC_TIMEOUT_ADDR 0x08
+#define TOTAL_PULSES_ADDR 0x0a
+#define CH_NAMES_ADDR 0x12
+
 
 bool run = true;
 
@@ -115,7 +133,9 @@ uint16_t sync_source = SYNC_EXT;
 uint16_t adc_timeout = 500;
 
 uint16_t curr_file_record = 0;
-uint32_t file_size = 0;
+
+std::string ch1_name("ch1_name");
+std::string ch2_name("ch2_name");
 
 void* map_base = (void *)-1;
 uint32_t data[DATA_ARRAY_SIZE * 2];
@@ -155,6 +175,14 @@ struct state
 uint32_t read_value(uint32_t a_addr);
 void write_value(uint32_t a_addr, uint32_t a_value);
 
+// save all configuration parameters
+void SaveAllParameters();
+
+// load all configuration parameters
+void LoadAllParameters();
+
+void SetSyncSourceBit(uint16_t value);
+
 // get data from adc once
 int GetData(uint16_t *adc_data);
 
@@ -163,6 +191,36 @@ void make_clock(uint32_t mask);
 
 // parse command function (used for console)
 std::vector <std::string> ParseCommand(char buf[]);
+
+
+/*
+
+----------------------------------------------------------------------------------------------------
+	Save one parameter to SETUP_FILE_NAME via address
+----------------------------------------------------------------------------------------------------
+
+*/
+
+template <typename T>
+void SaveParameter(T value, int address)
+{
+	// open settings file with binary mode, also file opens for read/write access to exclude data flushing
+	std::fstream file_wr(SETUP_FILE_NAME, std::fstream::binary | std::fstream::out | std::fstream::in);
+
+	// if file exist
+	if(file_wr.is_open())
+	{
+		// move to value address
+		file_wr.seekp(address, file_wr.beg);
+
+		// write value
+		file_wr.write((char*)&value, sizeof(value));
+
+		// close file
+		file_wr.close();
+	}
+}
+
 /*
 
 ----------------------------------------------------------------------------------------------------
@@ -256,14 +314,16 @@ void adcThread()
 					memset(data, 0, DATA_ARRAY_SIZE * 2 * sizeof(uint32_t));
 				}
 
+				// if file recording started and data collected
 				if(file_rec_run && allow_file_write)
 				{
 					allow_file_write = false;
 
+					// we need create new file
 					if(curr_file_record == 0)
 					{
+						// making file name from current time
 						curr_time = time(NULL);
-
 						struct tm *tm_struct;
 						tm_struct = localtime(&curr_time);
 
@@ -274,7 +334,9 @@ void adcThread()
 							<< tm_struct->tm_mday << " "
 							<< tm_struct->tm_hour << "-"
 							<< tm_struct->tm_min << "-"
-							<< tm_struct->tm_sec << ".ch2";
+							<< tm_struct->tm_sec << "_"
+							<< ch1_name << " "
+							<< ch2_name << ".ch2";
 
 						// convert stream to string
 						std::string time_str = DATA_FILE_PATH + ss.str();
@@ -298,42 +360,59 @@ void adcThread()
 						}
 					}
 
+					// if data file exists and opened
 					if(out_data_file.is_open())
 					{
-						out_data_file.write((char*)&curr_file_record, sizeof(uint16_t));				// number of record
+						// write current file record number(for control)
+						out_data_file.write((char*)&curr_file_record, sizeof(uint16_t));
+
+						// write adc data array
 						out_data_file.write((char*)data_for_file, DATA_ARRAY_SIZE * 2 * sizeof(uint32_t));  // record
 
 						curr_file_record++;
 					}
 
-					if(curr_file_record >= 1200)
+					// if enough file records and file is open
+					if(curr_file_record >= rec_per_file && out_data_file.is_open())
 					{
+						// end time recording to file header
 						curr_time = time(NULL);
 						out_data_file.seekp(0x0a, out_data_file.beg);
 						out_data_file.write((char*)&curr_time, sizeof(std::time_t));
+
+						// close file
 						out_data_file.close();
+
+						// flush file records counter
 						curr_file_record = 0;
 					}
 				}
 			}
-			else
+			else //if( GetData(adc_data) <= 0)
 				std::cout << "no sync." << std::endl;
 		}
-		else
+		else //!adc_run
 		{
+			// if data file is open
 			if(out_data_file.is_open())
 			{
+				// end time writing to file header
 				curr_time = time(NULL);
 				out_data_file.seekp(0x0a, out_data_file.beg);
 				out_data_file.write((char*)&curr_time, sizeof(std::time_t));
 
+				// writing to file header real collected file records
 				out_data_file.seekp(0x04, out_data_file.beg);
 				out_data_file.write((char*)&curr_file_record, sizeof(uint16_t));
 
+				// close file
 				out_data_file.close();
+
+				// flush record counter
 				curr_file_record = 0;
 			}
 
+			// wait sysytem idle time
 			std::this_thread::sleep_for(std::chrono::milliseconds(SYS_IDLE));
 		}
 	}
@@ -354,12 +433,16 @@ void IntSyncThread()
 		// if adc is running and sync source is internal
 		if(sync_source == SYNC_INT)
 		{
+			// make clock for internal synchro
 			adc_mutex.lock();
 			make_clock(SYNC_INT_BIT);
 			adc_mutex.unlock();
+
+			// wait internal synchro idle time (50ms typically)
 			std::this_thread::sleep_for(std::chrono::milliseconds(SYNC_INT_DELAY));
 		}
 		else
+			// wait system idle
 			std::this_thread::sleep_for(std::chrono::milliseconds(SYS_IDLE));
 	}
 }
@@ -382,25 +465,28 @@ int GetData(uint16_t *adc_data)
 	uint32_t adc1_ram_counter = 0;
 	uint32_t adc2_ram_counter = 0;
 
-	// waiting adc data ready with timeout
+	// initializing timeout calculation variables
 	int tout_counter = 0;
+	auto start_tick = std::chrono::high_resolution_clock::now();
+	auto idle_tick = std::chrono::high_resolution_clock::now();
+	auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(idle_tick - start_tick).count();
 
 	// waiting adc1 and adc2 buffers are filled
 	while((adc1_ram_counter < ADC_READY_RAM_SIZE) | (adc2_ram_counter < ADC_READY_RAM_SIZE))
 	{
 		// read adc RAM filling counter
-		adc_mutex.lock();
 		adc1_ram_counter = read_value(ADC1_CADDR) - ADC1_RAM;
 		adc2_ram_counter  = read_value(ADC2_CADDR) - ADC2_RAM;
-		adc_mutex.unlock();
 
+		// 10 microseconds - reaction time
 		std::this_thread::sleep_for(std::chrono::microseconds(10));
 
-		// TODO: timeout with real time.
-		tout_counter++;
+		// getting elapse time
+		idle_tick = std::chrono::high_resolution_clock::now();
+		elapsed = std::chrono::duration_cast<std::chrono::microseconds>(idle_tick - start_tick).count();
 
 		// if timeout.
-		if(tout_counter >= adc_timeout*10)
+		if( elapsed >= adc_timeout*1000)
 			break;
 	}
 
@@ -410,7 +496,7 @@ int GetData(uint16_t *adc_data)
 	adc_mutex.unlock();
 
 	// if timeout was
-	if(tout_counter >= adc_timeout*10)
+	if(elapsed >= adc_timeout*1000)
 		return -1;
 
 
@@ -434,7 +520,7 @@ int GetData(uint16_t *adc_data)
 /*
 
 ----------------------------------------------------------------------------------------------------
-	Thread for connected clients.
+	Thread for sending data to connected peer.
 ----------------------------------------------------------------------------------------------------
 
 */
@@ -444,8 +530,10 @@ void ClientSendThread(int peer, bool *connected)
 	//bool client_connected = true;
 	int bytes_read = 0;
 
+	// while peer connected
 	while(*connected)
 	{
+		// if data need send (32 bit)
 		if(data_need_send && data_updated)
 		{
 			bytes_read = send(peer, data_for_send, DATA_ARRAY_SIZE * 2 * sizeof(uint32_t), 0);
@@ -453,6 +541,7 @@ void ClientSendThread(int peer, bool *connected)
 			data_need_send = false;
 		}
 
+		// if data need send (16 bit)
 		if(data_need_send_16 && data_updated_16)
 		{
 			bytes_read = send(peer, adc_data, DATA_ARRAY_SIZE * 2 * sizeof(uint16_t), 0);
@@ -460,9 +549,18 @@ void ClientSendThread(int peer, bool *connected)
 			data_need_send_16 = false;
 		}
 
+		// system idle
 		std::this_thread::sleep_for(std::chrono::milliseconds(SYS_IDLE));
 	}
 }
+
+/*
+
+----------------------------------------------------------------------------------------------------
+	Thread for getting commands from connected peer.
+----------------------------------------------------------------------------------------------------
+
+*/
 
 void ClientThread(int peer)
 {
@@ -517,6 +615,7 @@ void ClientThread(int peer)
 				// stop adc conmmand
 				case CMD_ADC_STOP:
 					adc_run = false;
+					SaveParameter(total_pulses, TOTAL_PULSES_ADDR);
 					break;
 
 				// adc run
@@ -531,83 +630,74 @@ void ClientThread(int peer)
 						// file record start/stop
 						case REG_FILE_RUN:
 							file_rec_run = (unsigned int)value;
-							std::cout << "file_rec: " << file_rec_run << std:: endl;
+							SaveParameter(file_rec_run, FILE_REC_RUN_ADDR);
 							break;
 
 						// modify 'sync_source' variable
 						case REG_SYNC:
 						{
-							// TODO: SetSync function?
 							// setting up type of synchro got from peer
 							sync_source = (unsigned int)value;
 
-							// read state of GPIO_PL_0 register
-							uint32_t read_data = read_value(GPIO_PL_0);
+							SetSyncSourceBit(sync_source);
 
-							// if sync. source internal - setup hrdware
-							if(sync_source == SYNC_INT)
-							{
-								write_value( GPIO_PL_0, read_data | (uint32_t) SYNC_SOURCE_BIT );
-								std::cout << "sync source set to internal" << std::endl;
-							}
-
-							// if sync. source external - setup hardware
-							if(sync_source == SYNC_EXT)
-							{
-								write_value( GPIO_PL_0, read_data & ( ~((uint32_t)SYNC_SOURCE_BIT) ) );
-								std::cout << "sync source set to external" << std::endl;
-							}
-
+							SaveParameter(sync_source, SYNC_SOURCE_ADDR);
 							break;
 						}
 						// modify 'adc_tomeout' variable
 						case REG_TIMEOUT:
 							adc_timeout = (unsigned int)value;
+							SaveParameter(adc_timeout, ADC_TIMEOUT_ADDR);
 							std::cout << "timeout set to: " << adc_timeout << std::endl;
 							break;
 
 						// records per file
 						case REG_RECORDS:
 							rec_per_file = (unsigned int) value;
+							SaveParameter(rec_per_file, REC_PER_FILE_ADDR);
 							std::cout << "records per file set to: " << rec_per_file << std::endl;
 							break;
 
 						// pulses average
 						case REG_AVERAGE:
 							data_average = (unsigned int) value;
+							SaveParameter(data_average, DATA_AVERAGE_ADDR);
 							std::cout << "data average set to: " << data_average << std::endl;
 							break;
 
-						// TODO: time synchronization when peer connected
 						// setting up system time is got from host
 						case REG_TIME:
 						{
-							//struct tm *ts;
 							struct timeval *time_in_sec;
-							//struct timezone tz;
-							//double *fract_sec;
-
-							// gettting time structure and fractional seconds from buffer
-							//ts =  (struct tm*) (&buffer[11]);
-							//fract_sec = (double*)(&buffer[3]);
-
-							// cast time to linux format
-							//ts->tm_year = ts->tm_year - 1900;
-							//ts->tm_mon = ts->tm_mon - 1;
-							//ts->tm_hour = ts->tm_hour;
-
-							// fill timeval structure for settimeofdate
-							//time_in_sec.tv_sec = //mktime(ts);
-							//time_in_sec.tv_usec = //(unsigned long) 1000000.0 * (*fract_sec);
-
 							time_in_sec = (struct timeval*)(&buffer[3]);
-							std::cout << "time sec: " << time_in_sec->tv_sec << " usec: " << time_in_sec->tv_usec << std::endl;
 
 							// setting system time
 							if(settimeofday(time_in_sec, NULL) < 0)
 								std::cout << "time setting problem: -- " << strerror(errno) << " -- " << std::endl;
 							else
 								std::cout << "time successful updated" << std::endl;
+							break;
+						}
+
+						case REG_CH1_NAME:
+						{
+							char* name_str = new char[bytes_read - 3];
+							memcpy(name_str, &buffer[3], (bytes_read - 3));
+							ch1_name = name_str;
+
+							std::cout << "adc ch1 name changed to: " << ch1_name << std::endl;
+
+							SaveAllParameters();
+							break;
+						}
+
+						case REG_CH2_NAME:
+						{
+							char* name_str = new char[bytes_read - 3];
+							memcpy(name_str, &buffer[3], (bytes_read - 3));
+							ch2_name = name_str;
+							std::cout << "adc ch2 name changed to:: " << ch2_name << std::endl;
+							SaveAllParameters();
 							break;
 						}
 
@@ -623,6 +713,16 @@ void ClientThread(int peer)
 
 					switch(argument)
 					{
+						case REG_CH1_NAME:
+							// send adc channel 1 name to peer
+							bytes_read = send(peer, ch1_name.c_str(), ch1_name.length(), 0);
+							break;
+
+						case REG_CH2_NAME:
+							// send adc channel 2 name to peer
+							bytes_read = send(peer, ch2_name.c_str(), ch2_name.length(), 0);
+							break;
+
 						case REG_ADC_DATA:
 							//Send only if adc is running and data is 'fresh'
 							if( adc_run & data_updated )
@@ -654,15 +754,17 @@ void ClientThread(int peer)
 							break;
 						}
 
+						// send to peer state structure
 						case REG_STATE:
 						{
+							// fill sate structure
 							state send_state;
-
 							send_state.adc_run = adc_run;
 							send_state.file_rec_run = file_rec_run;
 							send_state.curr_pulses = curr_pulses;
 							send_state.total_pulses = total_pulses;
 
+							// send state structure
 							bytes_read = send(peer, &send_state, sizeof(state),0);
 							break;
 						}
@@ -784,7 +886,7 @@ void ServerListener()
 ----------------------------------------------------------------------------------------------------
 
 */
-
+/*
 void ConsoleThread()
 {
 	std::string incoming;
@@ -801,7 +903,7 @@ void ConsoleThread()
 		if(arr_command[0] == "exit")
 			run = 0;
 	}
-}
+}*/
 
 
 /*
@@ -836,13 +938,19 @@ int main()
 		exit(0);
 	}
 
+	//load server parameters from binary config file
+	LoadAllParameters();
+
+	// accept syn_source
+	SetSyncSourceBit(sync_source);
+
 	// create tcp listener thread
 	std::thread tcp_thr(ServerListener);
 	tcp_thr.detach();
 
 	// create console input thread
-	std::thread console_thr(ConsoleThread);
-	console_thr.detach();
+	//std::thread console_thr(ConsoleThread);
+	//console_thr.detach();
 
 	// adc idle thread
 	std::thread adc_thread(adcThread);
@@ -893,7 +1001,6 @@ void make_clock(uint32_t mask)
 	write_value( GPIO_PL_0, state & (~mask) );
 }
 
-
 /*
 
 ----------------------------------------------------------------------------------------------------
@@ -938,8 +1045,139 @@ std::vector <std::string> ParseCommand(char buf[])
 /*
 
 ----------------------------------------------------------------------------------------------------
-	End program;
+	Save all setup parameters to settings file
 ----------------------------------------------------------------------------------------------------
 
 */
 
+void SaveAllParameters()
+{
+	// file opening
+	std::ofstream file_wr(SETUP_FILE_NAME, std::ofstream::binary);
+
+	if(file_wr.is_open())
+	{
+		// serial writing parameters to settings file
+		file_wr.write((char*)&adc_run, sizeof(bool));
+		file_wr.write((char*)&file_rec_run, sizeof(bool));
+		file_wr.write((char*)&rec_per_file, sizeof(uint16_t));
+		file_wr.write((char*)&data_average, sizeof(uint16_t));
+		file_wr.write((char*)&sync_source, sizeof(uint16_t));
+		file_wr.write((char*)&adc_timeout, sizeof(uint16_t));
+		file_wr.write((char*)&total_pulses, sizeof(uint64_t));
+
+		// write ch1 name to settings file
+		uint16_t name_len = 0;
+		name_len = ch1_name.length();
+		file_wr.write((char*)&name_len, sizeof(uint16_t));
+
+		char* name_buf = new char[name_len];
+		std::strcpy(name_buf, ch1_name.c_str());
+		file_wr.write(	name_buf, name_len );
+
+		delete[] name_buf;
+
+		// write ch2 name to settings file
+		name_len = ch2_name.length();
+		file_wr.write((char*)&name_len, sizeof(uint16_t));
+
+		name_buf = new char[name_len];
+		std::strcpy(name_buf, ch2_name.c_str());
+		file_wr.write( name_buf, name_len );
+
+		delete[] name_buf;
+
+		// closing file
+		file_wr.close();
+	}
+}
+
+/*
+
+----------------------------------------------------------------------------------------------------
+	read all setup parameters from settings file
+----------------------------------------------------------------------------------------------------
+
+*/
+
+
+void LoadAllParameters()
+{
+	std::ifstream file_rd;
+	file_rd.open(SETUP_FILE_NAME, std::ifstream::binary);
+
+	if(file_rd.is_open())
+	{
+		// serial reading of parameters
+		file_rd.read((char*)&adc_run, sizeof(bool));
+		file_rd.read((char*)&file_rec_run, sizeof(bool));
+		file_rd.read((char*)&rec_per_file, sizeof(uint16_t));
+		file_rd.read((char*)&data_average, sizeof(uint16_t));
+		file_rd.read((char*)&sync_source, sizeof(uint16_t));
+		file_rd.read((char*)&adc_timeout, sizeof(uint16_t));
+		file_rd.read((char*)&total_pulses, sizeof(uint64_t));
+
+		// length of channel name
+		uint16_t name_len;
+
+		// reading ch1 name length from file
+		file_rd.read((char*)&name_len, sizeof(uint16_t));
+
+		// reading ch1 name from file with length
+		char* name_buf = new char[name_len];
+		file_rd.read(name_buf, name_len);
+		ch1_name = name_buf;
+		delete[] name_buf;
+
+		// reading ch2 
+		file_rd.read((char*) &name_len, sizeof(uint16_t));
+		name_buf = new char[name_len];
+		file_rd.read(name_buf, name_len);
+		ch2_name = name_buf;
+		delete[] name_buf;
+
+		// close config file
+		file_rd.close();
+	}
+	else
+	{
+		SaveAllParameters();
+	}
+}
+
+/*
+
+----------------------------------------------------------------------------------------------------
+	Set bit of synchronization source to hardware
+----------------------------------------------------------------------------------------------------
+
+*/
+
+void SetSyncSourceBit(uint16_t value)
+{
+	// read state of GPIO_PL_0 register
+	uint32_t read_data = read_value(GPIO_PL_0);
+
+	// if sync. source internal - setup hrdware
+	if(value == SYNC_INT)
+	{
+		write_value( GPIO_PL_0, read_data | (uint32_t) SYNC_SOURCE_BIT );
+		std::cout << "sync source set to internal" << std::endl;
+	}
+
+	// if sync. source external - setup hardware
+	if(value == SYNC_EXT)
+	{
+		write_value( GPIO_PL_0, read_data & ( ~((uint32_t)SYNC_SOURCE_BIT) ) );
+		std::cout << "sync source set to external" << std::endl;
+	}
+}
+
+
+/*
+
+----------------------------------------------------------------------------------------------------
+	End program;
+----------------------------------------------------------------------------------------------------
+
+*/
