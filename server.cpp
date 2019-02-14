@@ -81,6 +81,7 @@ unsigned long pulses_counter = 0;
 unsigned int sync_source = SYNC_EXT;
 unsigned int adc_timeout = 500;
 unsigned int file_records = 0;
+unsigned int file_size = 0;
 
 void* map_base = (void *)-1;
 uint32_t data[DATA_BUF_SIZE];
