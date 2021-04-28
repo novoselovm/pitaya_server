@@ -1,6 +1,7 @@
 
 #include <unistd.h>
 #include <iostream>
+#include <fstream>
 #include <string>
 #include <vector>
 #include <thread>
@@ -74,6 +75,7 @@
 bool run = true;
 bool adc_run = false;
 bool data_updated = false;
+bool data_need_send = false;
 bool file_data_updated = false;
 
 unsigned long pulses_counter = 0;
@@ -85,6 +87,10 @@ unsigned int file_size = 0;
 
 void* map_base = (void *)-1;
 uint32_t data[DATA_BUF_SIZE];
+
+
+
+
 
 /*
 
@@ -103,6 +109,9 @@ int GetData(uint32_t *adc_data);
 
 // make clock in mask bit of GPIO_PL_0 reg
 void make_clock(uint32_t mask);
+
+// parse command function (used for console)
+std::vector <std::string> ParseCommand(char buf[]);
 /*
 
 ----------------------------------------------------------------------------------------------------
@@ -164,6 +173,8 @@ void adcThread()
 
 				// fix data updated event
 				data_updated = true;
+
+				data_need_send = true;
 
 				// total pulses
 				pulses_counter++;
@@ -271,6 +282,26 @@ int GetData(uint32_t *adc_data)
 ----------------------------------------------------------------------------------------------------
 
 */
+
+void ClientSendThread(int peer)
+{
+	bool client_connected = true;
+	int bytes_read = 0;
+
+	while(client_connected)
+	{
+		if(data_need_send)
+		{
+			bytes_read = send(peer, data, DATA_BUF_SIZE*sizeof(uint32_t), 0);
+			data_need_send = false;
+
+			if(bytes_read <= 0)
+				client_connected = false;
+		}
+		else
+			usleep(1000);
+	}
+}
 
 void ClientThread(int peer)
 {
@@ -392,7 +423,7 @@ void ClientThread(int peer)
 					{
 						//Send only if adc is running and data is 'fresh'
 						if( adc_run & data_updated )
-							bytes_read = send(peer, data, DATA_BUF_SIZE*sizeof(uint32_t), 0);
+							data_need_send = true;
 					}
 
 					// trying to send value of pulses counter to peer
@@ -495,6 +526,9 @@ void ServerListener()
 			// create thread for peer service
 			std::thread client_thr(ClientThread, client);
 			client_thr.detach();
+
+			std::thread client_send_thr(ClientSendThread, client);
+			client_send_thr.detach();
 		}
 	}
 
@@ -621,7 +655,7 @@ void make_clock(uint32_t mask)
 /*
 
 ----------------------------------------------------------------------------------------------------
-	Parsing command function. (not_used)
+	Parsing command function. (used for console)
 ----------------------------------------------------------------------------------------------------
 
 */
