@@ -1,20 +1,20 @@
-
 #include <unistd.h>
 #include <iostream>
+#include <sstream>
 #include <fstream>
 #include <string>
 #include <vector>
 #include <thread>
+
 #include <ctime>
+#include <cstring>
 
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
-#include <string.h>
 #include <fcntl.h>
 #include <sys/mman.h>
-#include <time.h>
 #include <sys/time.h>
 
 #define BASE_ADDR		0x40000000
@@ -65,6 +65,7 @@
 #define REG_ADC_DATA	0x06
 #define REG_TIMEOUT	0x08
 #define REG_COUNTER	0x09
+#define REG_FILE_RUN 0x0a
 
 #define SYNC_EXT			0xFF
 #define SYNC_INT			0x01
@@ -76,13 +77,18 @@ bool run = true;
 bool adc_run = false;
 bool data_updated = false;
 bool data_need_send = false;
+bool file_rec_run = false;
 bool file_data_updated = false;
+
+std::ofstream out_data_file;
+std::time_t  curr_time;
 
 unsigned long pulses_counter = 0;
 
 unsigned int sync_source = SYNC_EXT;
 unsigned int adc_timeout = 500;
-unsigned int file_records = 0;
+
+unsigned int curr_file_record = 0;
 unsigned int file_size = 0;
 
 void* map_base = (void *)-1;
@@ -173,11 +179,55 @@ void adcThread()
 
 				// fix data updated event
 				data_updated = true;
-
 				data_need_send = true;
 
 				// total pulses
 				pulses_counter++;
+
+				if(file_rec_run)
+				{
+					if(curr_file_record == 0)
+					{
+						curr_time = time(NULL);
+
+						struct tm *tm_struct;
+						tm_struct = localtime(&curr_time);
+
+						// creating string stream for time formatting
+						std::stringstream ss;
+						ss << tm_struct->tm_year + 1900 << "-"
+							<< tm_struct->tm_mon + 1 << "-"
+							<< tm_struct->tm_mday << " "
+							<< tm_struct->tm_hour << "-"
+							<< tm_struct->tm_min << "-"
+							<< tm_struct->tm_sec << ".ch2";
+
+						// convert stream to string
+						std::string time_str = "/mnt/data/myfile/" + ss.str();
+
+						// trying open/create stream file
+						out_data_file.open(time_str);
+
+						// if file wasn't opened
+						if(!out_data_file)
+						{
+							file_rec_run = false;
+							std::cout << "File open error" << std::endl;
+						}
+					}
+
+					if(out_data_file.is_open())
+					{
+						out_data_file.write((char*)data, DATA_BUF_SIZE*sizeof(uint32_t));  // << curr_file_record;
+						curr_file_record++;
+					}
+
+					if(curr_file_record >= 1200)
+					{
+						out_data_file.close();
+						curr_file_record = 0;
+					}
+				}
 			}
 			else
 				std::cout << "no sync." << std::endl;
@@ -365,6 +415,14 @@ void ClientThread(int peer)
 
 				// cmd set "register" which got in argument
 				case CMD_SET:
+
+					// file record start/stop
+					if(argument == REG_FILE_RUN)
+					{
+						file_rec_run = (unsigned int)value;
+						std::cout << "file_rec: " << file_rec_run << std:: endl;
+					}
+
 					// modify 'sync_source' variable
 					if(argument == REG_SYNC)
 					{
@@ -506,9 +564,6 @@ void ServerListener()
       exit(0);
    }
 
-   // message to console for understanding server is started
-	std::cout << std::endl << "---- Server started listening ----" << std::endl << std::endl;
-
 	while(1)
 	{
    	peer_size = sizeof(my_peer);
@@ -577,7 +632,7 @@ void ConsoleThread()
 
 int main()
 {
-   int f_device = -1;
+	int f_device = -1;
 
 	// open PL device memory part like file
 	f_device = open("/dev/mem", O_RDWR | O_SYNC); 
@@ -617,6 +672,11 @@ int main()
 
 	// disconnect threads from main program
 	// because they have blocking calls
+
+	curr_time = time(NULL);
+	// message to console for understanding server is started
+
+	std::cout << std::endl << "---- Server started at " << ctime(&curr_time) << std::endl << std::endl;
 
 	// non blocking wait threads done;
 	while(run)
