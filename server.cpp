@@ -413,19 +413,12 @@ void ClientSendThread(int peer, bool *connected)
 	//bool client_connected = true;
 	int bytes_read = 0;
 
-	std::cout << "client_send_thread started" << std::endl;
-
 	while(*connected)
 	{
 		if(data_need_send)
 		{
 			bytes_read = send(peer, data_for_send, DATA_ARRAY_SIZE * 2 * sizeof(uint32_t), 0);
 			data_need_send = false;
-
-
-			//if(bytes_read <= DATA_ARRAY_SIZE * 2 * sizeof(uint32_t))
-			std::cout << "read: " << bytes_read << std::endl;
-			//	client_connected = false;
 		}
 		else
 			usleep(1000);
@@ -434,15 +427,10 @@ void ClientSendThread(int peer, bool *connected)
 		{
 			bytes_read = send(peer, adc_data, DATA_ARRAY_SIZE * 2 * sizeof(uint16_t), 0);
 			data_need_send_16 = false;
-
-			//if(bytes_read <= 0)
-			//	client_connected = false;
 		}
 		else
 			usleep(1000);
 	}
-
-	std::cout << "client_send_thread ended" << std::endl;
 }
 
 void ClientThread(int peer)
@@ -456,12 +444,7 @@ void ClientThread(int peer)
 	int value = 0;
 	bool client_connected = true;
 
-	std::cout << "client_thread started" << std::endl;
-
 	std::thread client_send_thr(ClientSendThread, peer, &client_connected);
-	client_send_thr.detach();
-
-	//std::vector <std::string> v_command;
 
 	while(client_connected)
 	{
@@ -614,7 +597,9 @@ void ClientThread(int peer)
 			}// end switch(command)
 		}
 	}// end while(client_connected)
-	std::cout << "client_thread ended" << std::endl;
+
+	// waiting for client thread ended 
+	client_send_thr.join();
 }//end of function
 
 /*
