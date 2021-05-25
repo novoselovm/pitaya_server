@@ -118,6 +118,19 @@ uint16_t adc_data[DATA_ARRAY_SIZE * 2];
 uint32_t data_for_file[DATA_ARRAY_SIZE * 2];
 uint32_t data_for_send[DATA_ARRAY_SIZE * 2];
 
+
+struct config
+{
+	bool adc_run;
+	bool file_rec_run;
+	uint16_t adc_timeout;
+	uint32_t sync_source;
+	uint32_t data_average;
+	uint32_t rec_per_file;
+	uint32_t curr_time;
+	uint32_t curr_pulses;
+	uint64_t total_pulses;
+};
 /*
 
 ----------------------------------------------------------------------------------------------------
@@ -496,84 +509,92 @@ void ClientThread(int peer)
 
 				// cmd set "register" which got in argument
 				case CMD_SET:
-
-					// file record start/stop
-					if(argument == REG_FILE_RUN)
+					switch(argument)
 					{
-						file_rec_run = (unsigned int)value;
-						std::cout << "file_rec: " << file_rec_run << std:: endl;
-					}
+						// file record start/stop
+						case REG_FILE_RUN:
+							file_rec_run = (unsigned int)value;
+							std::cout << "file_rec: " << file_rec_run << std:: endl;
+							break;
 
-					// modify 'sync_source' variable
-					if(argument == REG_SYNC)
-					{
-						// TODO: SetSync function?
-						// setting up type of synchro got from peer
-						sync_source = (unsigned int)value;
+						// modify 'sync_source' variable
+						case REG_SYNC:
+						{
+							// TODO: SetSync function?
+							// setting up type of synchro got from peer
+							sync_source = (unsigned int)value;
 
-						// read state of GPIO_PL_0 register
-						uint32_t read_data = read_value(GPIO_PL_0);
+							// read state of GPIO_PL_0 register
+							uint32_t read_data = read_value(GPIO_PL_0);
 
-						// if sync. source internal - setup hrdware
-						if(sync_source == SYNC_INT)
-							write_value( GPIO_PL_0, read_data | (uint32_t) SYNC_SOURCE_BIT );
+							// if sync. source internal - setup hrdware
+							if(sync_source == SYNC_INT)
+							{
+								write_value( GPIO_PL_0, read_data | (uint32_t) SYNC_SOURCE_BIT );
+								std::cout << "sync source set to internal" << std::endl;
+							}
 
-						// if sync. source external - setup hardware
-						if(sync_source == SYNC_EXT)
-							write_value( GPIO_PL_0, read_data & ( ~((uint32_t)SYNC_SOURCE_BIT) ) );
-					}
+							// if sync. source external - setup hardware
+							if(sync_source == SYNC_EXT)
+							{
+								write_value( GPIO_PL_0, read_data & ( ~((uint32_t)SYNC_SOURCE_BIT) ) );
+								std::cout << "sync source set to external" << std::endl;
+							}
 
-					// modify 'adc_tomeout' variable
-					if(argument == REG_TIMEOUT)
-					{
-						adc_timeout = (unsigned int)value;
-					}
+							break;
+						}
+						// modify 'adc_tomeout' variable
+						case REG_TIMEOUT:
+							adc_timeout = (unsigned int)value;
+							std::cout << "timeout set to: " << adc_timeout << std::endl;
+							break;
 
-					// records per file
-					if(argument == REG_RECORDS)
-					{
-						rec_per_file = (unsigned int) value;
-					}
+						// records per file
+						case REG_RECORDS:
+							rec_per_file = (unsigned int) value;
+							std::cout << "records per file set to: " << rec_per_file << std::endl;
+							break;
 
-					// pulses average
-					if(argument == REG_AVERAGE)
-					{
-						data_average = (unsigned int) value;
-					}
+						// pulses average
+						case REG_AVERAGE:
+							data_average = (unsigned int) value;
+							std::cout << "data average set to: " << data_average << std::endl;
+							break;
 
-					// TODO: time synchronization when peer connected
-					// setting up system time is got from host
-					if(argument == REG_TIME)
-					{
-						struct tm *ts;
-						struct timeval time_in_sec;
-						//struct timezone tz;
-						double *fract_sec;
+						// TODO: time synchronization when peer connected
+						// setting up system time is got from host
+						case REG_TIME:
+						{
+							struct tm *ts;
+							struct timeval time_in_sec;
+							//struct timezone tz;
+							double *fract_sec;
 
-						//tz.tz_minuteswest = -420; //tomsk?
-						//tz.tz_dsttime = 0;
+							// gettting time structure and fractional seconds from buffer
+							ts =  (struct tm*) (&buffer[11]);
+							fract_sec = (double*)(&buffer[3]);
 
-						// gettting time structure and fractional seconds from buffer
-						ts =  (struct tm*) (&buffer[11]);
-						fract_sec = (double*)(&buffer[3]);
+							// cast time to linux format
+							ts->tm_year = ts->tm_year - 1900;
+							ts->tm_mon = ts->tm_mon - 1;
+							ts->tm_hour = ts->tm_hour;
 
-						//gettimeofday(&time_in_sec, &tz);
+							// fill timeval structure for settimeofdate
+							time_in_sec.tv_sec = mktime(ts);
+							time_in_sec.tv_usec = (unsigned long) 1000000.0 * (*fract_sec);
 
-						//std::cout << "timezone " << tz.tz_minuteswest << " dst: " << tz.tz_dsttime << std::endl;
+							// setting system time
+							if(settimeofday(&time_in_sec, NULL) < 0)
+								std::cout << "time setting problem: -- " << strerror(errno) << " -- " << std::endl;
+							else
+								std::cout << "time successful updated" << std::endl;
+							break;
+						}
 
-						// cast time to linux format
-						ts->tm_year = ts->tm_year - 1900;
-						ts->tm_mon = ts->tm_mon - 1;
-						ts->tm_hour = ts->tm_hour;
-
-						// fill timeval structure for settimeofdate
-						time_in_sec.tv_sec = mktime(ts);
-						time_in_sec.tv_usec = (unsigned long) 1000000.0 * (*fract_sec);
-
-						// setting system time
-						if(settimeofday(&time_in_sec, NULL) < 0)
-							std::cout << "time setting problem: -- " << strerror(errno) << " -- " << std::endl;
-					}
+						default:
+							std::cout << "SET command argument wrong." << std::endl;
+							break;
+					}//end of switch(reg)
 					break;
 
 				//if command GET
@@ -599,35 +620,6 @@ void ClientThread(int peer)
 
 						case REG_ALL:
 							// get all server registers
-
-							/*
-							adc_run 			// bool
-							file_rec_run	// bool
-
-							adc_timeout		// unsigned int
-							sync_source		// unsigned int
-
-							data_average 	// unsigned int
-							rec_per_file 	// unsigned int
-
-							curr_time		// time_t
-							curr_pulses		// unsigned int
-							total_pulses	// unsigned long
-							*/
-
-							struct config
-							{
-								bool adc_run;
-								bool file_rec_run;
-								uint16_t adc_timeout;
-								uint32_t sync_source;
-								uint32_t data_average;
-								uint32_t rec_per_file;
-								uint32_t curr_time;
-								uint32_t curr_pulses;
-								uint64_t total_pulses;
-							};
-
 							config send_cfg;
 
 							send_cfg.adc_run = adc_run;
@@ -658,7 +650,7 @@ void ClientThread(int peer)
 					std::cout << "bad command." << std::endl;
 					break;
 			}// end switch(command)
-		}
+		}//end if(data_read < 0)
 	}// end while(client_connected)
 
 	// waiting for client thread ended 
