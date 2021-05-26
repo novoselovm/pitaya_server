@@ -5,6 +5,8 @@
 #include <string>
 #include <vector>
 #include <thread>
+#include <mutex>
+#include <chrono>
 
 #include <ctime>
 #include <cstring>
@@ -79,7 +81,8 @@
 #define SYNC_INT			0x01
 #define SYNC_SOURCE_BIT 0x02
 #define SYNC_INT_BIT		0x01
-#define SYNC_INT_DELAY	50000
+#define SYNC_INT_DELAY	50  		// intrnal sync delay (ms)
+#define SYS_IDLE		   1			// system_idle (ms)
 
 bool run = true;
 
@@ -94,6 +97,7 @@ bool data_need_send = false;
 
 std::ofstream out_data_file;
 std::time_t curr_time;
+std::mutex adc_mutex;
 
 uint64_t total_pulses = 0;
 uint32_t curr_pulses = 0;
@@ -239,9 +243,7 @@ void adcThread()
 						data_for_send[i] = data[i];
 					}
 
-					// mark data updated event
-					//data_need_send = true;
-
+					// mark data was updated
 					data_updated = true;
 					allow_file_write = true;
 
@@ -323,7 +325,8 @@ void adcThread()
 				out_data_file.write((char*)&curr_time, sizeof(std::time_t));
 				out_data_file.close();
 			}
-			usleep(1000); // TODO: replace usleep with proc. control
+
+			std::this_thread::sleep_for(std::chrono::milliseconds(SYS_IDLE));
 		}
 	}
 }
@@ -341,14 +344,15 @@ void IntSyncThread()
 	while(run)
 	{
 		// if adc is running and sync source is internal
-		if( adc_run && sync_source == SYNC_INT)
+		if(sync_source == SYNC_INT)
 		{
+			adc_mutex.lock();
 			make_clock(SYNC_INT_BIT);
-			usleep(SYNC_INT_DELAY);
+			adc_mutex.unlock();
+			std::this_thread::sleep_for(std::chrono::milliseconds(SYNC_INT_DELAY));
 		}
 		else
-			usleep(1000);
-		// TODO: replace usleep with thread control functions
+			std::this_thread::sleep_for(std::chrono::milliseconds(SYS_IDLE));
 	}
 }
 
@@ -363,8 +367,9 @@ void IntSyncThread()
 int GetData(uint16_t *adc_data)
 {
 	// Turn on ADC1 and ADC2 converting
+	adc_mutex.lock();
 	make_clock( ADC1_ON | ADC2_ON );
-
+	adc_mutex.unlock();
 	// Waiting until AD 1 and 2 finish converting
 	uint32_t adc1_ram_counter = 0;
 	uint32_t adc2_ram_counter = 0;
@@ -376,10 +381,12 @@ int GetData(uint16_t *adc_data)
 	while((adc1_ram_counter < ADC_READY_RAM_SIZE) | (adc2_ram_counter < ADC_READY_RAM_SIZE))
 	{
 		// read adc RAM filling counter
+		adc_mutex.lock();
 		adc1_ram_counter = read_value(ADC1_CADDR) - ADC1_RAM;
 		adc2_ram_counter  = read_value(ADC2_CADDR) - ADC2_RAM;
+		adc_mutex.unlock();
 
-		usleep(10);
+		std::this_thread::sleep_for(std::chrono::microseconds(10));
 
 		// TODO: timeout with real time.
 		tout_counter++;
@@ -390,7 +397,9 @@ int GetData(uint16_t *adc_data)
 	}
 
 	// Turn OFF ADC1 and ADC2 converting
+	adc_mutex.lock();
 	make_clock( ADC1_OFF | ADC2_OFF );
+	adc_mutex.unlock();
 
 	// if timeout was
 	if(tout_counter >= adc_timeout*10)
@@ -429,21 +438,21 @@ void ClientSendThread(int peer, bool *connected)
 
 	while(*connected)
 	{
-		if(data_need_send)
+		if(data_need_send && data_updated)
 		{
 			bytes_read = send(peer, data_for_send, DATA_ARRAY_SIZE * 2 * sizeof(uint32_t), 0);
+			data_updated = false;
 			data_need_send = false;
 		}
-		else
-			usleep(1000);
 
-		if(data_need_send_16)
+		if(data_need_send_16 && data_updated_16)
 		{
 			bytes_read = send(peer, adc_data, DATA_ARRAY_SIZE * 2 * sizeof(uint16_t), 0);
+			data_updated_16 = false;
 			data_need_send_16 = false;
 		}
-		else
-			usleep(1000);
+
+		std::this_thread::sleep_for(std::chrono::milliseconds(SYS_IDLE));
 	}
 }
 
@@ -565,26 +574,29 @@ void ClientThread(int peer)
 						// setting up system time is got from host
 						case REG_TIME:
 						{
-							struct tm *ts;
-							struct timeval time_in_sec;
+							//struct tm *ts;
+							struct timeval *time_in_sec;
 							//struct timezone tz;
-							double *fract_sec;
+							//double *fract_sec;
 
 							// gettting time structure and fractional seconds from buffer
-							ts =  (struct tm*) (&buffer[11]);
-							fract_sec = (double*)(&buffer[3]);
+							//ts =  (struct tm*) (&buffer[11]);
+							//fract_sec = (double*)(&buffer[3]);
 
 							// cast time to linux format
-							ts->tm_year = ts->tm_year - 1900;
-							ts->tm_mon = ts->tm_mon - 1;
-							ts->tm_hour = ts->tm_hour;
+							//ts->tm_year = ts->tm_year - 1900;
+							//ts->tm_mon = ts->tm_mon - 1;
+							//ts->tm_hour = ts->tm_hour;
 
 							// fill timeval structure for settimeofdate
-							time_in_sec.tv_sec = mktime(ts);
-							time_in_sec.tv_usec = (unsigned long) 1000000.0 * (*fract_sec);
+							//time_in_sec.tv_sec = //mktime(ts);
+							//time_in_sec.tv_usec = //(unsigned long) 1000000.0 * (*fract_sec);
+
+							time_in_sec = (struct timeval*)(&buffer[3]);
+							std::cout << "time sec: " << time_in_sec->tv_sec << " usec: " << time_in_sec->tv_usec << std::endl;
 
 							// setting system time
-							if(settimeofday(&time_in_sec, NULL) < 0)
+							if(settimeofday(time_in_sec, NULL) < 0)
 								std::cout << "time setting problem: -- " << strerror(errno) << " -- " << std::endl;
 							else
 								std::cout << "time successful updated" << std::endl;
@@ -622,6 +634,7 @@ void ClientThread(int peer)
 							// get all server registers
 							config send_cfg;
 
+							// filling config strucure
 							send_cfg.adc_run = adc_run;
 							send_cfg.file_rec_run = file_rec_run;
 							send_cfg.adc_timeout = (uint16_t) adc_timeout;
@@ -632,11 +645,8 @@ void ClientThread(int peer)
 							send_cfg.curr_pulses = curr_pulses;
 							send_cfg.total_pulses = total_pulses;
 
+							// send structure to peer
 							bytes_read = send(peer, &send_cfg, sizeof(send_cfg),0);
-
-							std::cout << "registers send in " << bytes_read << " bytes" << std::endl;
-
-							//TODO: 1 - try to send each register, 2 - try with structure
 							break;
 
 						default:
@@ -645,7 +655,7 @@ void ClientThread(int peer)
 					// case CMD_GET.
 					break;
 
-				default:
+			default:
 					// if command bad
 					std::cout << "bad command." << std::endl;
 					break;
@@ -836,7 +846,7 @@ int main()
 	// non blocking wait threads done;
 	while(run)
 	{
-		usleep(1000);
+		std::this_thread::sleep_for(std::chrono::milliseconds(SYS_IDLE));
 	}
 
 	// message for understanding correct server shutdown
