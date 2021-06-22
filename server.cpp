@@ -51,7 +51,7 @@
 #define ADC_READY_RAM_SIZE	0x7E00
 #define DATA_BUF_SIZE 		0x4000
 
-#define DATA_ARRAY_SIZE			0x4000	// adc 16384 of 16 bit elements per channel
+#define DATA_ARRAY_SIZE		0x4000	// adc 16384 of 16 bit elements per channel
 
 #define DATA_FILE_PATH 		"/mnt/data/myfile/"
 
@@ -329,23 +329,23 @@ void adcThread()
 
 						// creating string stream for time formatting
 						std::stringstream ss;
-						ss << tm_struct->tm_year + 1900 << "-"
-							<< tm_struct->tm_mon + 1 << "-"
-							<< tm_struct->tm_mday << " "
-							<< tm_struct->tm_hour << "-"
-							<< tm_struct->tm_min << "-"
+						ss << tm_struct->tm_year + 1900
+							<< tm_struct->tm_mon + 1
+							<< tm_struct->tm_mday << "_"
+							<< tm_struct->tm_hour
+							<< tm_struct->tm_min
 							<< tm_struct->tm_sec << "_"
-							<< ch1_name << " "
+							<< ch1_name << "_"
 							<< ch2_name << ".ch2";
 
 						// convert stream to string
-						std::string time_str = DATA_FILE_PATH + ss.str();
+						std::string out_file_name = DATA_FILE_PATH + ss.str();
 
 						// trying open/create stream file
-						out_data_file.open(time_str);
+						out_data_file.open(out_file_name);
 
 						// if file wasn't opened
-						if(!out_data_file)
+						if(!out_data_file.is_open())
 						{
 							file_rec_run = false;
 							std::cout << "File open error" << std::endl;
@@ -357,6 +357,25 @@ void adcThread()
 							out_data_file.write((char*)&rec_per_file, sizeof(uint16_t));	// #0x04	file records(real)
 							out_data_file.write((char*)&curr_time, sizeof(std::time_t));	// #0x06 time start
 							out_data_file.write((char*)&curr_time, sizeof(std::time_t));	// #0x0a	time end
+
+							// write ch1 name to data file header
+							uint16_t name_len = 0;
+							name_len = ch1_name.length() + 1;
+							out_data_file.write((char*)&name_len, sizeof(uint16_t));
+
+							char* name_buf = new char[name_len];
+							std::strcpy(name_buf, ch1_name.c_str());
+							out_data_file.write(	name_buf, name_len );
+							delete[] name_buf;
+
+							// write ch2 name to data file header
+							name_len = ch2_name.length() + 1;
+							out_data_file.write((char*)&name_len, sizeof(uint16_t));
+
+							name_buf = new char[name_len];
+							std::strcpy(name_buf, ch2_name.c_str());
+							out_data_file.write( name_buf, name_len );
+							delete[] name_buf;
 						}
 					}
 
@@ -620,7 +639,16 @@ void ClientThread(int peer)
 
 				// adc run
 				case CMD_ADC_RUN:
-					adc_run = true;
+					if(!adc_run)
+					{
+						curr_pulses = 0;
+						curr_file_record = 0;
+						allow_file_write = false;
+						data_updated = false;
+						data_updated_16 = false;
+						adc_run = true;
+					}
+
 					break;
 
 				// cmd set "register" which got in argument
@@ -631,6 +659,7 @@ void ClientThread(int peer)
 						case REG_FILE_RUN:
 							file_rec_run = (unsigned int)value;
 							SaveParameter(file_rec_run, FILE_REC_RUN_ADDR);
+							std::cout << "file rec changed to " << file_rec_run << std::endl;
 							break;
 
 						// modify 'sync_source' variable
@@ -681,8 +710,8 @@ void ClientThread(int peer)
 
 						case REG_CH1_NAME:
 						{
-							char* name_str = new char[bytes_read - 3];
-							memcpy(name_str, &buffer[3], (bytes_read - 3));
+							char* name_str = new char[bytes_read - 2];
+							memcpy(name_str, &buffer[3], bytes_read - 2);
 							ch1_name = name_str;
 
 							std::cout << "adc ch1 name changed to: " << ch1_name << std::endl;
@@ -693,8 +722,8 @@ void ClientThread(int peer)
 
 						case REG_CH2_NAME:
 						{
-							char* name_str = new char[bytes_read - 3];
-							memcpy(name_str, &buffer[3], (bytes_read - 3));
+							char* name_str = new char[bytes_read - 2];
+							memcpy(name_str, &buffer[3], (bytes_read - 2));
 							ch2_name = name_str;
 							std::cout << "adc ch2 name changed to:: " << ch2_name << std::endl;
 							SaveAllParameters();
@@ -1068,17 +1097,18 @@ void SaveAllParameters()
 
 		// write ch1 name to settings file
 		uint16_t name_len = 0;
-		name_len = ch1_name.length();
+		name_len = ch1_name.length() + 1;
+
 		file_wr.write((char*)&name_len, sizeof(uint16_t));
 
 		char* name_buf = new char[name_len];
 		std::strcpy(name_buf, ch1_name.c_str());
-		file_wr.write(	name_buf, name_len );
+		file_wr.write(	name_buf, name_len);
 
 		delete[] name_buf;
 
 		// write ch2 name to settings file
-		name_len = ch2_name.length();
+		name_len = ch2_name.length() + 1;
 		file_wr.write((char*)&name_len, sizeof(uint16_t));
 
 		name_buf = new char[name_len];
@@ -1124,15 +1154,19 @@ void LoadAllParameters()
 		file_rd.read((char*)&name_len, sizeof(uint16_t));
 
 		// reading ch1 name from file with length
-		char* name_buf = new char[name_len];
+		char* name_buf = new char[(name_len)];
 		file_rd.read(name_buf, name_len);
+
+		//name_buf[name_len] = 0;
 		ch1_name = name_buf;
 		delete[] name_buf;
 
 		// reading ch2 
 		file_rd.read((char*) &name_len, sizeof(uint16_t));
-		name_buf = new char[name_len];
+
+		name_buf = new char[name_len + 1];
 		file_rd.read(name_buf, name_len);
+
 		ch2_name = name_buf;
 		delete[] name_buf;
 
