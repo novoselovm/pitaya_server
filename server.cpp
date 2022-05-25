@@ -1,5 +1,6 @@
 #include <unistd.h>
 #include <iostream>
+#include <iomanip>
 #include <sstream>
 #include <fstream>
 #include <string>
@@ -8,6 +9,7 @@
 #include <mutex>
 #include <chrono>
 #include <bitset>
+#include <queue>
 
 #include <ctime>
 #include <cstring>
@@ -19,90 +21,10 @@
 #include <fcntl.h>
 #include <sys/mman.h>
 #include <sys/time.h>
-
-#define BASE_ADDR		0x40000000
-#define GPIO_PL_0		(0x40020000 - BASE_ADDR)
-
-#define ADC1_RAM		0x40000000
-#define ADC2_RAM		0x40010000
-
-#define ADC1_GPIO		0x40040000
-#define ADC2_GPIO		0x40030000
-
-#define ADC1_DMA		0x40050000
-#define ADC2_DMA		0x40060000
-
-#define ADC1_TMR		0x40050014
-#define ADC2_TMR		0x40060014
-
-#define ADC1_CTRL		(0x40050018 - BASE_ADDR)
-#define ADC2_CTRL		(0x40060018 - BASE_ADDR)
-
-#define ADC1_CADDR	(0x40050020 - BASE_ADDR)
-#define ADC2_CADDR	(0x40060020 - BASE_ADDR)
-
-#define ADC1_ON		0x100
-#define ADC2_ON		0x400
-
-#define ADC1_OFF		0x200
-#define ADC2_OFF		0x800
-
-#define ADC_RAM_SIZE	 		0x8000
-#define ADC_READY_RAM_SIZE	0x7E00
-#define DATA_BUF_SIZE 		0x4000
-
-#define DATA_ARRAY_SIZE		0x4000	// adc 16384 of 16 bit elements per channel
-
-#define DATA_FILE_PATH 		"/mnt/data/myfile/"
-
-#define MAP_SIZE 		0x70000
-#define MAP_MASK 		(MAP_SIZE - 1)
-
-
-#define SETUP_FILE_NAME "settings.cfg"
-
-#define DEV_ID			0xFA
-
-#define CMD_EXIT 		0xFF
-#define CMD_SET		0x02
-#define CMD_GET		0x04
-#define CMD_ADC_RUN	0x08
-#define CMD_ADC_STOP 0x0a
-
-#define REG_ALL			0xFF
-#define REG_CFG			0xFA
-#define REG_STATE			0xFB
-#define REG_SYNC			0x02
-#define REG_TIME			0x04
-#define REG_ADC_DATA		0x06
-#define REG_ADC_DATA_16	0x07
-#define REG_TIMEOUT		0x08
-#define REG_COUNTER		0x09
-#define REG_FILE_RUN 	0x0a
-#define REG_RECORDS		0x0b
-#define REG_AVERAGE		0x0c
-#define REG_CH1_NAME		0x0d
-#define REG_CH2_NAME		0x0e
-
-#define SYNC_EXT			0xFF
-#define SYNC_INT			0x01
-#define SYNC_SOURCE_BIT 0x02
-#define SYNC_INT_BIT		0x01
-#define SYNC_INT_DELAY	50  		// intrnal sync delay (ms)
-#define SYS_IDLE		   1			// system_idle (ms)
-
-
-// config file defines
-
-#define ADC_RUN_ADDR 0x00
-#define FILE_REC_RUN_ADDR 0x01
-#define REC_PER_FILE_ADDR 0x02
-#define DATA_AVERAGE_ADDR 0x04
-#define SYNC_SOURCE_ADDR 0x06
-#define ADC_TIMEOUT_ADDR 0x08
-#define TOTAL_PULSES_ADDR 0x0a
-#define CH_NAMES_ADDR 0x12
-
+#include <sys/vfs.h>
+#include <sys/stat.h>
+#include <dirent.h>
+#include "header.h"
 
 bool run = true;
 
@@ -111,13 +33,12 @@ bool data_updated_16 = false;
 bool data_need_send_16 = false;
 
 bool data_updated = false;
-bool data_need_send = false;
-
-
 
 std::ofstream out_data_file;
 std::time_t curr_time;
+
 std::mutex adc_mutex;
+std::mutex data_mutex;
 
 uint64_t total_pulses = 0;
 uint32_t curr_pulses = 0;
@@ -138,6 +59,8 @@ std::string ch1_name("ch1_name");
 std::string ch2_name("ch2_name");
 
 void* map_base = (void *)-1;
+
+std::queue <int> que_for_send;
 uint32_t data[DATA_ARRAY_SIZE * 2];
 uint16_t adc_data[DATA_ARRAY_SIZE * 2];
 
@@ -301,17 +224,20 @@ void adcThread()
 
 				if(curr_pulses % data_average == 0)
 				{
+					data_mutex.lock();
 					for(int i = 0; i < DATA_ARRAY_SIZE * 2; i++)
 					{
 						data_for_file[i] = data[i];
 						data_for_send[i] = data[i];
 					}
+					data_mutex.unlock();
 
 					// mark data was updated
 					data_updated = true;
 					allow_file_write = true;
 
 					memset(data, 0, DATA_ARRAY_SIZE * 2 * sizeof(uint32_t));
+
 				}
 
 				// if file recording started and data collected
@@ -453,9 +379,7 @@ void IntSyncThread()
 		if(sync_source == SYNC_INT)
 		{
 			// make clock for internal synchro
-			adc_mutex.lock();
 			make_clock(SYNC_INT_BIT);
-			adc_mutex.unlock();
 
 			// wait internal synchro idle time (50ms typically)
 			std::this_thread::sleep_for(std::chrono::milliseconds(SYNC_INT_DELAY));
@@ -477,9 +401,8 @@ void IntSyncThread()
 int GetData(uint16_t *adc_data)
 {
 	// Turn on ADC1 and ADC2 converting
-	adc_mutex.lock();
 	make_clock( ADC1_ON | ADC2_ON );
-	adc_mutex.unlock();
+
 	// Waiting until AD 1 and 2 finish converting
 	uint32_t adc1_ram_counter = 0;
 	uint32_t adc2_ram_counter = 0;
@@ -491,11 +414,12 @@ int GetData(uint16_t *adc_data)
 	auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(idle_tick - start_tick).count();
 
 	// waiting adc1 and adc2 buffers are filled
-	while((adc1_ram_counter < ADC_READY_RAM_SIZE) | (adc2_ram_counter < ADC_READY_RAM_SIZE))
+
+	while( (adc1_ram_counter < ADC_READY_RAM_SIZE) | (adc2_ram_counter < ADC_READY_RAM_SIZE))
 	{
 		// read adc RAM filling counter
 		adc1_ram_counter = read_value(ADC1_CADDR) - ADC1_RAM;
-		adc2_ram_counter  = read_value(ADC2_CADDR) - ADC2_RAM;
+		adc2_ram_counter = read_value(ADC2_CADDR) - ADC2_RAM;
 
 		// 10 microseconds - reaction time
 		std::this_thread::sleep_for(std::chrono::microseconds(10));
@@ -505,14 +429,12 @@ int GetData(uint16_t *adc_data)
 		elapsed = std::chrono::duration_cast<std::chrono::microseconds>(idle_tick - start_tick).count();
 
 		// if timeout.
-		if( elapsed >= adc_timeout*1000)
+		if( elapsed >= adc_timeout*1000 )
 			break;
 	}
 
 	// Turn OFF ADC1 and ADC2 converting
-	adc_mutex.lock();
 	make_clock( ADC1_OFF | ADC2_OFF );
-	adc_mutex.unlock();
 
 	// if timeout was
 	if(elapsed >= adc_timeout*1000)
@@ -553,11 +475,13 @@ void ClientSendThread(int peer, bool *connected)
 	while(*connected)
 	{
 		// if data need send (32 bit)
-		if(data_need_send && data_updated)
+		if( !que_for_send.empty() && data_updated)
 		{
+			que_for_send.pop();
+			data_mutex.lock();
 			bytes_read = send(peer, data_for_send, DATA_ARRAY_SIZE * 2 * sizeof(uint32_t), 0);
+			data_mutex.unlock();
 			data_updated = false;
-			data_need_send = false;
 		}
 
 		// if data need send (16 bit)
@@ -567,6 +491,8 @@ void ClientSendThread(int peer, bool *connected)
 			data_updated_16 = false;
 			data_need_send_16 = false;
 		}
+
+		//std::cout << data_updated << " " << que_for_send.size() << std::endl;
 
 		// system idle
 		std::this_thread::sleep_for(std::chrono::milliseconds(SYS_IDLE));
@@ -699,7 +625,7 @@ void ClientThread(int peer)
 						{
 							struct timeval *time_in_sec;
 							time_in_sec = (struct timeval*)(&buffer[3]);
-
+							std::cout << "sec.: " << time_in_sec->tv_sec << " usec.: " << time_in_sec->tv_usec << std::endl;
 							// setting system time
 							if(settimeofday(time_in_sec, NULL) < 0)
 								std::cout << "time setting problem: -- " << strerror(errno) << " -- " << std::endl;
@@ -743,9 +669,10 @@ void ClientThread(int peer)
 					switch(argument)
 					{
 						case REG_CH1_NAME:
-							// send adc channel 1 name to peer
-							bytes_read = send(peer, ch1_name.c_str(), ch1_name.length(), 0);
+						{	// send adc channel 1 name to peer
+							bytes_read = send(peer, ch1_name.c_str(), ch1_name.length() , 0);
 							break;
+						}
 
 						case REG_CH2_NAME:
 							// send adc channel 2 name to peer
@@ -754,13 +681,13 @@ void ClientThread(int peer)
 
 						case REG_ADC_DATA:
 							//Send only if adc is running and data is 'fresh'
-							if( adc_run & data_updated )
-								data_need_send = true;
+							if( adc_run )
+							   que_for_send.push(1);
 							break;
 						case REG_ADC_DATA_16:
 							//Send only if adc is running and data is 'fresh'
 							if( adc_run & data_updated_16 )
-								data_need_send_16 = true;
+							   data_need_send_16 = true;
 							break;
 						case REG_COUNTER:
 							// trying to send value of pulses counter to peer
@@ -935,6 +862,44 @@ void ConsoleThread()
 }*/
 
 
+int check_files(std::string directory)
+{
+   DIR *dir;
+   dirent *entry;
+   dir = opendir(directory.c_str());
+
+   int file_count = 0;
+   struct stat st;
+
+   if(dir)
+   {
+      while((entry = readdir(dir)) != nullptr)
+      {
+         if( (strcmp(entry->d_name,".") != 0) && (strcmp(entry->d_name, "..") != 0) )
+         {
+            std::string tmp_path = directory + entry->d_name;
+            stat(tmp_path.c_str(), &st);
+
+            if(S_ISREG(st.st_mode))
+            {
+               file_count++;
+               std::cout << std::setw(15) << entry->d_name << "|";
+               std::cout << std::setw(8) << st.st_size << "|";
+               std::cout << std::setw(30) << tmp_path.c_str() << std::endl;
+            }
+
+            if(S_ISDIR(st.st_mode))
+               file_count += check_files(tmp_path + "/");
+         }
+      }
+   }
+
+   return file_count;
+}
+
+
+
+
 /*
 
 ----------------------------------------------------------------------------------------------------
@@ -946,6 +911,23 @@ void ConsoleThread()
 int main()
 {
 	int f_device = -1;
+
+	std::string dirname = "/mnt/data/";
+	struct statfs fs;
+	statfs(dirname.c_str(), &fs);
+
+	std::cout << " available: " << ((fs.f_bsize/1024) * ((fs.f_blocks - fs.f_bfree + fs.f_bavail)/1024))/1024 << "GB; ";
+	std::cout << " free: " << ((fs.f_bsize/1024) * (fs.f_bavail/1024))/1024 <<"GB; " << std::endl << std::endl;
+
+	DIR *dir;
+	dirent *entry;
+	dir = opendir(dirname.c_str());
+
+	int file_counter = 0;
+	std::cout << std::setw(15) << "name" << std::setw(8) << "size" << std::setw(30) << "path" << std::endl;
+	file_counter = check_files(dirname);
+
+	std::cout << "total fles: " << file_counter << std::endl << std::endl;
 
 	// open PL device memory part like file
 	f_device = open("/dev/mem", O_RDWR | O_SYNC); 
@@ -1024,10 +1006,15 @@ void make_clock(uint32_t mask)
 	// get initial GPIO_PL_0 state
 	state = read_value(GPIO_PL_0);
 
+	adc_mutex.lock();
 	// make 'GPIO_PL_0' pulse like 'CLEAR->SET->CLEAR' bit added with mask
 	write_value( GPIO_PL_0, state & (~mask) );
 	write_value( GPIO_PL_0, state | mask );
+	adc_mutex.unlock();
+	std::this_thread::sleep_for(std::chrono::microseconds(SYNC_PULSE_WIDTH));
+	adc_mutex.lock();
 	write_value( GPIO_PL_0, state & (~mask) );
+	adc_mutex.unlock();
 }
 
 /*
